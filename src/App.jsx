@@ -1,369 +1,599 @@
-/* eslint-disable no-unused-vars */
 /* eslint-disable react-hooks/immutability */
 import React, { useState, useEffect } from "react";
-import { Play, Database, Table, Plus } from "lucide-react";
-import { SimpleRDBMS } from "./database";
+import { Users, BookOpen, Trash2, Edit2, Save, X } from "lucide-react";
 
-export default function App() {
+// ==================== SIMPLIFIED RDBMS CORE ====================
+
+class SimpleRDBMS {
+  constructor() {
+    this.tables = {};
+    this.indexes = {};
+  }
+
+  execute(sql) {
+    const trimmed = sql.trim();
+
+    if (trimmed.toUpperCase().startsWith("CREATE TABLE")) {
+      return this.createTable(trimmed);
+    } else if (trimmed.toUpperCase().startsWith("INSERT INTO")) {
+      return this.insert(trimmed);
+    } else if (trimmed.toUpperCase().startsWith("SELECT")) {
+      return this.select(trimmed);
+    } else if (trimmed.toUpperCase().startsWith("UPDATE")) {
+      return this.update(trimmed);
+    } else if (trimmed.toUpperCase().startsWith("DELETE")) {
+      return this.delete(trimmed);
+    }
+
+    throw new Error("Unknown command");
+  }
+
+  createTable(sql) {
+    const match = sql.match(/CREATE TABLE (\w+)\s*\((.*)\)/i);
+    if (!match) throw new Error("Invalid CREATE TABLE syntax");
+
+    const tableName = match[1];
+    const columnDefs = match[2].split(",").map((c) => c.trim());
+
+    const columns = [];
+    const constraints = { primaryKey: null, unique: [] };
+
+    columnDefs.forEach((def) => {
+      const parts = def.split(/\s+/);
+      const colName = parts[0];
+      const colType = parts[1];
+
+      columns.push({ name: colName, type: colType });
+
+      if (def.toUpperCase().includes("PRIMARY KEY")) {
+        constraints.primaryKey = colName;
+      }
+      if (def.toUpperCase().includes("UNIQUE")) {
+        constraints.unique.push(colName);
+      }
+    });
+
+    this.tables[tableName] = {
+      columns,
+      constraints,
+      rows: [],
+      nextId: 1,
+    };
+
+    return { success: true, message: `Table ${tableName} created` };
+  }
+
+  insert(sql) {
+    const match = sql.match(
+      /INSERT INTO (\w+)\s*\((.*?)\)\s*VALUES\s*\((.*?)\)/i
+    );
+    if (!match) throw new Error("Invalid INSERT syntax");
+
+    const tableName = match[1];
+    const columns = match[2].split(",").map((c) => c.trim());
+    const values = this.parseValues(match[3]);
+
+    const table = this.tables[tableName];
+    if (!table) throw new Error(`Table ${tableName} does not exist`);
+
+    const row = {};
+
+    if (
+      table.constraints.primaryKey &&
+      !columns.includes(table.constraints.primaryKey)
+    ) {
+      row[table.constraints.primaryKey] = table.nextId++;
+    }
+
+    columns.forEach((col, i) => {
+      row[col] = this.castValue(
+        values[i],
+        table.columns.find((c) => c.name === col)?.type
+      );
+    });
+
+    if (table.constraints.primaryKey) {
+      const pkValue = row[table.constraints.primaryKey];
+      if (table.rows.some((r) => r[table.constraints.primaryKey] === pkValue)) {
+        throw new Error("Primary key violation");
+      }
+    }
+
+    table.constraints.unique.forEach((col) => {
+      if (
+        row[col] !== undefined &&
+        table.rows.some((r) => r[col] === row[col])
+      ) {
+        throw new Error(`Unique constraint violation on ${col}`);
+      }
+    });
+
+    table.rows.push(row);
+
+    return { success: true, message: "Row inserted", rowsAffected: 1 };
+  }
+
+  select(sql) {
+    const whereParts = sql.split(/WHERE/i);
+    const selectPart = whereParts[0];
+    const whereClause = whereParts[1]?.trim();
+
+    const match = selectPart.match(/SELECT\s+(.*?)\s+FROM\s+(\w+)/i);
+    if (!match) throw new Error("Invalid SELECT syntax");
+
+    const columns =
+      match[1].trim() === "*" ? "*" : match[1].split(",").map((c) => c.trim());
+    const tableName = match[2];
+
+    const table = this.tables[tableName];
+    if (!table) throw new Error(`Table ${tableName} does not exist`);
+
+    let rows = [...table.rows];
+
+    if (whereClause) {
+      rows = rows.filter((row) => this.evaluateWhere(row, whereClause));
+    }
+
+    if (columns !== "*") {
+      rows = rows.map((row) => {
+        const projected = {};
+        columns.forEach((col) => {
+          projected[col] = row[col];
+        });
+        return projected;
+      });
+    }
+
+    return { success: true, data: rows, rowCount: rows.length };
+  }
+
+  update(sql) {
+    const match = sql.match(/UPDATE\s+(\w+)\s+SET\s+(.*?)\s+WHERE\s+(.*)/i);
+    if (!match) throw new Error("Invalid UPDATE syntax");
+
+    const tableName = match[1];
+    const setPart = match[2];
+    const whereClause = match[3];
+
+    const table = this.tables[tableName];
+    if (!table) throw new Error(`Table ${tableName} does not exist`);
+
+    const updates = {};
+    setPart.split(",").forEach((s) => {
+      const [col, val] = s.split("=").map((v) => v.trim());
+      updates[col] = this.parseValue(val);
+    });
+
+    let count = 0;
+    table.rows.forEach((row) => {
+      if (this.evaluateWhere(row, whereClause)) {
+        Object.assign(row, updates);
+        count++;
+      }
+    });
+
+    return {
+      success: true,
+      message: `Updated ${count} rows`,
+      rowsAffected: count,
+    };
+  }
+
+  delete(sql) {
+    const match = sql.match(/DELETE FROM\s+(\w+)\s+WHERE\s+(.*)/i);
+    if (!match) throw new Error("Invalid DELETE syntax");
+
+    const tableName = match[1];
+    const whereClause = match[2];
+
+    const table = this.tables[tableName];
+    if (!table) throw new Error(`Table ${tableName} does not exist`);
+
+    const initialLength = table.rows.length;
+    table.rows = table.rows.filter(
+      (row) => !this.evaluateWhere(row, whereClause)
+    );
+    const deleted = initialLength - table.rows.length;
+
+    return {
+      success: true,
+      message: `Deleted ${deleted} rows`,
+      rowsAffected: deleted,
+    };
+  }
+
+  evaluateWhere(row, whereClause) {
+    const operators = {
+      ">=": (a, b) => a >= b,
+      "<=": (a, b) => a <= b,
+      "!=": (a, b) => a != b,
+      "=": (a, b) => a == b,
+      ">": (a, b) => a > b,
+      "<": (a, b) => a < b,
+    };
+
+    for (const [op, fn] of Object.entries(operators)) {
+      if (whereClause.includes(op)) {
+        const [col, val] = whereClause.split(op).map((s) => s.trim());
+        return fn(row[col], this.parseValue(val));
+      }
+    }
+
+    return true;
+  }
+
+  parseValues(str) {
+    const values = [];
+    let current = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < str.length; i++) {
+      const char = str[i];
+      if (char === "'" || char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === "," && !inQuotes) {
+        values.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    values.push(current.trim());
+
+    return values.map((v) => this.parseValue(v));
+  }
+
+  parseValue(val) {
+    val = val.trim();
+    if (
+      (val.startsWith("'") && val.endsWith("'")) ||
+      (val.startsWith('"') && val.endsWith('"'))
+    ) {
+      return val.slice(1, -1);
+    }
+    if (!isNaN(val) && val !== "") return Number(val);
+    return val;
+  }
+
+  castValue(val, type) {
+    if (type === "INTEGER") return parseInt(val);
+    if (type === "REAL") return parseFloat(val);
+    return String(val);
+  }
+}
+
+// ==================== SIMPLE STUDENT MANAGEMENT WEBSITE ====================
+
+export default function StudentManagementApp() {
   const [db] = useState(() => new SimpleRDBMS());
-  const [query, setQuery] = useState("");
-  const [result, setResult] = useState(null);
-  const [activeTab, setActiveTab] = useState("repl");
+  const [students, setStudents] = useState([]);
+  const [editingId, setEditingId] = useState(null);
 
-  // Demo data for the task manager
-  const [tasks, setTasks] = useState([]);
-  const [newTask, setNewTask] = useState({
-    title: "",
-    description: "",
-    priority: "Medium",
+  const [formData, setFormData] = useState({
+    name: "",
+    age: "",
+    grade: "",
+    email: "",
   });
 
-  // Initialize demo tables
   useEffect(() => {
     try {
       db.execute(
-        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, description TEXT, priority TEXT, completed INTEGER, created_at TEXT)"
+        "CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, grade TEXT, email TEXT UNIQUE)"
+      );
+
+      db.execute(
+        "INSERT INTO students (name, age, grade, email) VALUES ('John Doe', 20, 'A', 'john@school.com')"
       );
       db.execute(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT UNIQUE)"
+        "INSERT INTO students (name, age, grade, email) VALUES ('Jane Smith', 22, 'B', 'jane@school.com')"
       );
       db.execute(
-        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
+        "INSERT INTO students (name, age, grade, email) VALUES ('Bob Johnson', 19, 'A', 'bob@school.com')"
       );
-      db.execute(
-        "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
-      );
-      loadTasks();
+
+      loadStudents();
     } catch (e) {
       console.error("Init error:", e);
     }
   }, []);
 
-  const executeQuery = () => {
+  const loadStudents = () => {
     try {
-      const res = db.execute(query);
-      setResult(res);
-
-      if (query.toUpperCase().includes("TASKS")) {
-        loadTasks();
-      }
-    } catch (error) {
-      setResult({ success: false, error: error.message });
-    }
-  };
-
-  const loadTasks = () => {
-    try {
-      const res = db.execute("SELECT * FROM tasks");
-      setTasks(res.data || []);
+      const result = db.execute("SELECT * FROM students");
+      setStudents(result.data || []);
     } catch (e) {
-      setTasks([]);
+      console.error("Load error:", e);
+      setStudents([]);
     }
   };
 
-  const addTask = () => {
-    if (!newTask.title) return;
-
-    const now = new Date().toISOString();
-    const query = `INSERT INTO tasks (title, description, priority, completed, created_at) VALUES ('${newTask.title}', '${newTask.description}', '${newTask.priority}', 0, '${now}')`;
+  const addStudent = () => {
+    if (!formData.name || !formData.age || !formData.grade || !formData.email) {
+      alert("Please fill in all fields");
+      return;
+    }
 
     try {
+      const query = `INSERT INTO students (name, age, grade, email) VALUES ('${formData.name}', ${formData.age}, '${formData.grade}', '${formData.email}')`;
       db.execute(query);
-      setNewTask({ title: "", description: "", priority: "Medium" });
-      loadTasks();
+
+      setFormData({ name: "", age: "", grade: "", email: "" });
+      loadStudents();
+      alert("Student added successfully!");
     } catch (e) {
-      alert("Error: " + e.message);
+      alert("Error adding student: " + e.message);
     }
   };
 
-  const toggleTask = (id) => {
+  const startEdit = (student) => {
+    setEditingId(student.id);
+    setFormData({
+      name: student.name,
+      age: student.age,
+      grade: student.grade,
+      email: student.email,
+    });
+  };
+
+  const saveEdit = () => {
     try {
-      const task = tasks.find((t) => t.id === id);
-      const newCompleted = task.completed ? 0 : 1;
-      db.execute(
-        `UPDATE tasks SET completed = ${newCompleted} WHERE id = ${id}`
-      );
-      loadTasks();
+      const query = `UPDATE students SET name = '${formData.name}', age = ${formData.age}, grade = '${formData.grade}', email = '${formData.email}' WHERE id = ${editingId}`;
+      db.execute(query);
+
+      setFormData({ name: "", age: "", grade: "", email: "" });
+      setEditingId(null);
+      loadStudents();
+      alert("Student updated successfully!");
     } catch (e) {
-      alert("Error: " + e.message);
+      alert("Error updating student: " + e.message);
     }
   };
 
-  const deleteTask = (id) => {
+  const cancelEdit = () => {
+    setEditingId(null);
+    setFormData({ name: "", age: "", grade: "", email: "" });
+  };
+
+  const deleteStudent = (id) => {
+    if (!confirm("Are you sure you want to delete this student?")) {
+      return;
+    }
+
     try {
-      db.execute(`DELETE FROM tasks WHERE id = ${id}`);
-      loadTasks();
+      db.execute(`DELETE FROM students WHERE id = ${id}`);
+      loadStudents();
+      alert("Student deleted successfully!");
     } catch (e) {
-      alert("Error: " + e.message);
+      alert("Error deleting student: " + e.message);
     }
   };
-
-  const exampleQueries = [
-    "SHOW TABLES",
-    "DESCRIBE tasks",
-    "SELECT * FROM tasks",
-    "SELECT * FROM users",
-    "INSERT INTO tasks (title, description, priority, completed, created_at) VALUES ('Learn SQL', 'Study database basics', 'High', 0, '2026-01-13')",
-    "UPDATE tasks SET completed = 1 WHERE id = 1",
-    "DELETE FROM tasks WHERE completed = 1",
-    "CREATE INDEX idx_priority ON tasks (priority)",
-  ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl overflow-hidden border border-white/20">
-          <div className="bg-gradient-to-r from-purple-600 to-blue-600 p-6">
-            <div className="flex items-center gap-3">
-              <Database className="w-8 h-8 text-white" />
-              <h1 className="text-3xl font-bold text-white">Simple RDBMS</h1>
-            </div>
-            <p className="text-purple-100 mt-2">
-              A minimal relational database with SQL support
-            </p>
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
+      <div className="max-w-5xl mx-auto">
+        <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
+          <div className="flex items-center gap-3 mb-2">
+            <Users className="w-10 h-10 text-indigo-600" />
+            <h1 className="text-4xl font-bold text-gray-800">
+              Student Management System
+            </h1>
           </div>
+          <p className="text-gray-600">
+            Add, edit, and manage student records using a simple database
+          </p>
+        </div>
 
-          <div className="flex border-b border-white/20">
-            <button
-              onClick={() => setActiveTab("repl")}
-              className={`flex-1 px-6 py-3 font-semibold transition ${
-                activeTab === "repl"
-                  ? "bg-white/20 text-white border-b-2 border-purple-400"
-                  : "text-purple-200 hover:bg-white/5"
-              }`}
-            >
-              SQL REPL
-            </button>
-            <button
-              onClick={() => setActiveTab("app")}
-              className={`flex-1 px-6 py-3 font-semibold transition ${
-                activeTab === "app"
-                  ? "bg-white/20 text-white border-b-2 border-purple-400"
-                  : "text-purple-200 hover:bg-white/5"
-              }`}
-            >
-              Task Manager Demo
-            </button>
-          </div>
+        <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
+          <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+            <BookOpen className="w-6 h-6 text-indigo-600" />
+            {editingId ? "Edit Student" : "Add New Student"}
+          </h2>
 
-          {activeTab === "repl" && (
-            <div className="p-6">
-              <div className="mb-4">
-                <label className="block text-purple-200 font-semibold mb-2">
-                  Enter SQL Query:
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Student Name
                 </label>
-                <textarea
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  className="w-full h-32 bg-slate-800/50 text-white border border-purple-500/30 rounded-lg p-4 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  placeholder="SELECT * FROM users"
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) =>
+                    setFormData({ ...formData, name: e.target.value })
+                  }
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none"
+                  placeholder="Enter full name"
                 />
               </div>
 
-              <div className="flex gap-2 mb-4">
-                <button
-                  onClick={executeQuery}
-                  className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:from-purple-700 hover:to-blue-700 transition"
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Age
+                </label>
+                <input
+                  type="number"
+                  value={formData.age}
+                  onChange={(e) =>
+                    setFormData({ ...formData, age: e.target.value })
+                  }
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none"
+                  placeholder="Enter age"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Grade
+                </label>
+                <select
+                  value={formData.grade}
+                  onChange={(e) =>
+                    setFormData({ ...formData, grade: e.target.value })
+                  }
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none"
                 >
-                  <Play className="w-4 h-4" />
-                  Execute
+                  <option value="">Select grade</option>
+                  <option value="A">A</option>
+                  <option value="B">B</option>
+                  <option value="C">C</option>
+                  <option value="D">D</option>
+                  <option value="F">F</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={formData.email}
+                  onChange={(e) =>
+                    setFormData({ ...formData, email: e.target.value })
+                  }
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none"
+                  placeholder="student@school.com"
+                />
+              </div>
+            </div>
+
+            {editingId ? (
+              <div className="flex gap-3">
+                <button
+                  onClick={saveEdit}
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-lg transition flex items-center justify-center gap-2"
+                >
+                  <Save className="w-5 h-5" />
+                  Save Changes
+                </button>
+                <button
+                  onClick={cancelEdit}
+                  className="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition flex items-center justify-center gap-2"
+                >
+                  <X className="w-5 h-5" />
+                  Cancel
                 </button>
               </div>
+            ) : (
+              <button
+                onClick={addStudent}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+              >
+                Add Student
+              </button>
+            )}
+          </div>
+        </div>
 
-              <div className="mb-4">
-                <label className="block text-purple-200 font-semibold mb-2">
-                  Example Queries:
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {exampleQueries.map((q, i) => (
-                    <button
-                      key={i}
-                      onClick={() => setQuery(q)}
-                      className="bg-slate-700/50 text-purple-200 px-3 py-1 rounded text-xs hover:bg-slate-600/50 transition"
+        <div className="bg-white rounded-xl shadow-lg p-8">
+          <h2 className="text-2xl font-bold text-gray-800 mb-6">
+            All Students ({students.length})
+          </h2>
+
+          {students.length === 0 ? (
+            <p className="text-center text-gray-500 py-8">
+              No students found. Add one above!
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b-2 border-gray-200">
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      ID
+                    </th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Name
+                    </th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Age
+                    </th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Grade
+                    </th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Email
+                    </th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {students.map((student) => (
+                    <tr
+                      key={student.id}
+                      className="border-b border-gray-100 hover:bg-gray-50"
                     >
-                      {q.substring(0, 30)}...
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {result && (
-                <div className="bg-slate-800/50 rounded-lg p-4 border border-purple-500/30">
-                  <h3 className="text-purple-200 font-semibold mb-2">
-                    Result:
-                  </h3>
-                  {result.success ? (
-                    result.data ? (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b border-purple-500/30">
-                              {Object.keys(result.data[0] || {}).map((col) => (
-                                <th
-                                  key={col}
-                                  className="text-left text-purple-300 py-2 px-3"
-                                >
-                                  {col}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {result.data.map((row, i) => (
-                              <tr
-                                key={i}
-                                className="border-b border-purple-500/10 hover:bg-white/5"
-                              >
-                                {Object.values(row).map((val, j) => (
-                                  <td key={j} className="text-white py-2 px-3">
-                                    {String(val)}
-                                  </td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                        <p className="text-purple-300 text-xs mt-2">
-                          {result.rowCount} rows
-                        </p>
-                      </div>
-                    ) : (
-                      <p className="text-green-400">{result.message}</p>
-                    )
-                  ) : (
-                    <p className="text-red-400">Error: {result.error}</p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === "app" && (
-            <div className="p-6">
-              <div className="bg-slate-800/50 rounded-lg p-6 mb-6 border border-purple-500/30">
-                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-                  <Plus className="w-5 h-5" />
-                  Add New Task
-                </h2>
-                <div className="grid gap-4">
-                  <input
-                    type="text"
-                    placeholder="Task title"
-                    value={newTask.title}
-                    onChange={(e) =>
-                      setNewTask({ ...newTask, title: e.target.value })
-                    }
-                    className="bg-slate-700/50 text-white border border-purple-500/30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Description"
-                    value={newTask.description}
-                    onChange={(e) =>
-                      setNewTask({ ...newTask, description: e.target.value })
-                    }
-                    className="bg-slate-700/50 text-white border border-purple-500/30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                  <select
-                    value={newTask.priority}
-                    onChange={(e) =>
-                      setNewTask({ ...newTask, priority: e.target.value })
-                    }
-                    className="bg-slate-700/50 text-white border border-purple-500/30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  >
-                    <option>Low</option>
-                    <option>Medium</option>
-                    <option>High</option>
-                  </select>
-                  <button
-                    onClick={addTask}
-                    className="bg-gradient-to-r from-purple-600 to-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:from-purple-700 hover:to-blue-700 transition"
-                  >
-                    Add Task
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-                  <Table className="w-5 h-5" />
-                  Tasks ({tasks.length})
-                </h2>
-                {tasks.length === 0 ? (
-                  <p className="text-purple-300 text-center py-8">
-                    No tasks yet. Add one above!
-                  </p>
-                ) : (
-                  tasks.map((task) => (
-                    <div
-                      key={task.id}
-                      className="bg-slate-800/50 rounded-lg p-4 border border-purple-500/30 hover:border-purple-500/50 transition"
-                    >
-                      <div className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          checked={task.completed === 1}
-                          onChange={() => toggleTask(task.id)}
-                          className="mt-1 w-5 h-5 rounded"
-                        />
-                        <div className="flex-1">
-                          <h3
-                            className={`font-semibold ${
-                              task.completed
-                                ? "line-through text-purple-400"
-                                : "text-white"
-                            }`}
-                          >
-                            {task.title}
-                          </h3>
-                          <p className="text-purple-300 text-sm mt-1">
-                            {task.description}
-                          </p>
-                          <div className="flex gap-2 mt-2">
-                            <span
-                              className={`text-xs px-2 py-1 rounded ${
-                                task.priority === "High"
-                                  ? "bg-red-500/20 text-red-300"
-                                  : task.priority === "Medium"
-                                  ? "bg-yellow-500/20 text-yellow-300"
-                                  : "bg-green-500/20 text-green-300"
-                              }`}
-                            >
-                              {task.priority}
-                            </span>
-                            <span className="text-xs text-purple-400">
-                              ID: {task.id}
-                            </span>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => deleteTask(task.id)}
-                          className="text-red-400 hover:text-red-300 transition text-sm"
+                      <td className="py-4 px-4 text-gray-600">{student.id}</td>
+                      <td className="py-4 px-4 text-gray-800 font-medium">
+                        {student.name}
+                      </td>
+                      <td className="py-4 px-4 text-gray-600">{student.age}</td>
+                      <td className="py-4 px-4">
+                        <span
+                          className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${
+                            student.grade === "A"
+                              ? "bg-green-100 text-green-800"
+                              : student.grade === "B"
+                              ? "bg-blue-100 text-blue-800"
+                              : student.grade === "C"
+                              ? "bg-yellow-100 text-yellow-800"
+                              : "bg-red-100 text-red-800"
+                          }`}
                         >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
+                          {student.grade}
+                        </span>
+                      </td>
+                      <td className="py-4 px-4 text-gray-600">
+                        {student.email}
+                      </td>
+                      <td className="py-4 px-4">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => startEdit(student)}
+                            className="bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-lg transition"
+                            title="Edit"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => deleteStudent(student.id)}
+                            className="bg-red-500 hover:bg-red-600 text-white p-2 rounded-lg transition"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
 
-        <div className="mt-6 bg-white/5 backdrop-blur-lg rounded-lg p-4 border border-white/10">
-          <h3 className="text-white font-semibold mb-2">
-            Features Implemented:
-          </h3>
-          <ul className="text-purple-200 text-sm space-y-1">
-            <li>✓ CREATE TABLE with INTEGER and TEXT types</li>
-            <li>✓ PRIMARY KEY and UNIQUE constraints</li>
-            <li>✓ INSERT, SELECT, UPDATE, DELETE operations</li>
-            <li>✓ WHERE clauses with comparison operators</li>
-            <li>✓ Basic JOIN support (INNER JOIN)</li>
-            <li>✓ CREATE INDEX for performance optimization</li>
-            <li>✓ Interactive SQL REPL</li>
-            <li>✓ Practical demo: Task Manager web app</li>
+        <div className="bg-indigo-50 border-2 border-indigo-200 rounded-xl p-6 mt-6">
+          <h3 className="font-bold text-indigo-900 mb-3">How This Works:</h3>
+          <ul className="space-y-2 text-indigo-800">
+            <li>
+              <strong>CREATE:</strong> Fill the form and click "Add Student" to
+              insert into database
+            </li>
+            <li>
+              <strong>READ:</strong> All students are loaded from the database
+              and displayed in the table
+            </li>
+            <li>
+              <strong>UPDATE:</strong> Click the edit button (pencil icon) to
+              modify a student's information
+            </li>
+            <li>
+              <strong>DELETE:</strong> Click the delete button (trash icon) to
+              remove a student
+            </li>
           </ul>
         </div>
       </div>
