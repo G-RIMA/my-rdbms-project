@@ -1,41 +1,80 @@
 /* eslint-disable no-unused-vars */
-// database.js - The RDBMS Core Engine
+// database.js - RDBMS with File Persistence
 
 export class SimpleRDBMS {
   constructor() {
-    this.tables = {}; // Store all tables
-    this.indexes = {}; // Store all indexes
+    this.tables = {};
+    this.indexes = {};
+    this.dataDir = "rdbms_data";
+    this.loadFromStorage();
+  }
+
+  // Save database to localStorage (browser's persistent storage)
+  saveToStorage() {
+    try {
+      const data = {
+        tables: this.tables,
+        indexes: this.indexes,
+      };
+      localStorage.setItem("rdbms_database", JSON.stringify(data));
+    } catch (e) {
+      console.error("Failed to save to storage:", e);
+    }
+  }
+
+  // Load database from localStorage
+  loadFromStorage() {
+    try {
+      const stored = localStorage.getItem("rdbms_database");
+      if (stored) {
+        const data = JSON.parse(stored);
+        this.tables = data.tables || {};
+        this.indexes = data.indexes || {};
+      }
+    } catch (e) {
+      console.error("Failed to load from storage:", e);
+    }
   }
 
   // Main entry point - parse and execute SQL commands
   execute(sql) {
     const trimmed = sql.trim();
+    let result;
 
-    // Route to appropriate handler based on command
     if (trimmed.toUpperCase().startsWith("CREATE TABLE")) {
-      return this.createTable(trimmed);
+      result = this.createTable(trimmed);
     } else if (trimmed.toUpperCase().startsWith("INSERT INTO")) {
-      return this.insert(trimmed);
+      result = this.insert(trimmed);
     } else if (trimmed.toUpperCase().startsWith("SELECT")) {
-      return this.select(trimmed);
+      result = this.select(trimmed);
     } else if (trimmed.toUpperCase().startsWith("UPDATE")) {
-      return this.update(trimmed);
+      result = this.update(trimmed);
     } else if (trimmed.toUpperCase().startsWith("DELETE")) {
-      return this.delete(trimmed);
+      result = this.delete(trimmed);
     } else if (trimmed.toUpperCase().startsWith("CREATE INDEX")) {
-      return this.createIndex(trimmed);
+      result = this.createIndex(trimmed);
     } else if (trimmed.toUpperCase().startsWith("SHOW TABLES")) {
-      return this.showTables();
+      result = this.showTables();
     } else if (trimmed.toUpperCase().startsWith("DESCRIBE")) {
-      return this.describeTable(trimmed);
+      result = this.describeTable(trimmed);
+    } else {
+      throw new Error("Unknown command: " + trimmed);
     }
 
-    throw new Error("Unknown command: " + trimmed);
+    // Save after any write operation
+    if (
+      !trimmed.toUpperCase().startsWith("SELECT") &&
+      !trimmed.toUpperCase().startsWith("SHOW") &&
+      !trimmed.toUpperCase().startsWith("DESCRIBE")
+    ) {
+      this.saveToStorage();
+    }
+
+    return result;
   }
 
   // CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT UNIQUE)
   createTable(sql) {
-    // Use regex to extract table name and column definitions
     const match = sql.match(/CREATE TABLE (\w+)\s*\((.*)\)/i);
     if (!match) throw new Error("Invalid CREATE TABLE syntax");
 
@@ -48,7 +87,6 @@ export class SimpleRDBMS {
       unique: [],
     };
 
-    // Parse each column definition
     columnDefs.forEach((def) => {
       const parts = def.split(/\s+/);
       const colName = parts[0];
@@ -56,22 +94,19 @@ export class SimpleRDBMS {
 
       columns.push({ name: colName, type: colType });
 
-      // Check for PRIMARY KEY constraint
       if (def.toUpperCase().includes("PRIMARY KEY")) {
         constraints.primaryKey = colName;
       }
-      // Check for UNIQUE constraint
       if (def.toUpperCase().includes("UNIQUE")) {
         constraints.unique.push(colName);
       }
     });
 
-    // Store table structure
     this.tables[tableName] = {
       columns,
       constraints,
       rows: [],
-      nextId: 1, // Auto-increment counter for primary keys
+      nextId: 1,
     };
 
     return { success: true, message: `Table ${tableName} created` };
@@ -101,7 +136,6 @@ export class SimpleRDBMS {
       row[table.constraints.primaryKey] = table.nextId++;
     }
 
-    // Map column names to values
     columns.forEach((col, i) => {
       row[col] = this.castValue(
         values[i],
@@ -127,7 +161,6 @@ export class SimpleRDBMS {
       }
     });
 
-    // Add row to table
     table.rows.push(row);
 
     // Update any indexes
@@ -166,7 +199,7 @@ export class SimpleRDBMS {
     const table = this.tables[tableName];
     if (!table) throw new Error(`Table ${tableName} does not exist`);
 
-    let rows = [...table.rows]; // Copy array
+    let rows = [...table.rows];
 
     // Apply WHERE clause
     if (whereClause) {
@@ -206,7 +239,6 @@ export class SimpleRDBMS {
       table2.rows.forEach((row2) => {
         if (row1[joinCol1] === row2[joinCol2]) {
           const joined = {};
-          // Prefix columns with table name
           Object.keys(row1).forEach((k) => {
             joined[`${table1Name}.${k}`] = row1[k];
           });
@@ -270,7 +302,6 @@ export class SimpleRDBMS {
     if (!table) throw new Error(`Table ${tableName} does not exist`);
 
     const initialLength = table.rows.length;
-    // Filter out rows that match WHERE clause
     table.rows = table.rows.filter(
       (row) => !this.evaluateWhere(row, whereClause)
     );
