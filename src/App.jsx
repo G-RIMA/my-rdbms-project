@@ -15,7 +15,9 @@ export default function StudentManagementApp() {
   const [db] = useState(() => new SimpleRDBMS());
   const [students, setStudents] = useState([]);
   const [editingId, setEditingId] = useState(null);
-  const [activeTab, setActiveTab] = useState("students");
+  const [activeTab, setActiveTab] = useState("students"); // Add tab state
+  const [sqlQuery, setSqlQuery] = useState(""); // Add SQL query state
+  const [sqlResult, setSqlResult] = useState(null); // Add SQL result state
 
   const [formData, setFormData] = useState({
     name: "",
@@ -125,6 +127,23 @@ export default function StudentManagementApp() {
     }
   };
 
+  // Execute SQL query
+  const executeSql = () => {
+    try {
+      const result = db.execute(sqlQuery);
+      setSqlResult(result);
+      if (
+        sqlQuery.toUpperCase().includes("INSERT") ||
+        sqlQuery.toUpperCase().includes("UPDATE") ||
+        sqlQuery.toUpperCase().includes("DELETE")
+      ) {
+        loadStudents();
+      }
+    } catch (e) {
+      setSqlResult({ success: false, error: e.message });
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
       <div className="max-w-5xl mx-auto">
@@ -153,6 +172,17 @@ export default function StudentManagementApp() {
             >
               <Users className="w-5 h-5 inline mr-2" />
               Student Management
+            </button>
+            <button
+              onClick={() => setActiveTab("sql")}
+              className={`flex-1 px-6 py-4 font-semibold transition ${
+                activeTab === "sql"
+                  ? "bg-indigo-600 text-white"
+                  : "bg-white text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              <Terminal className="w-5 h-5 inline mr-2" />
+              SQL Console
             </button>
           </div>
         </div>
@@ -355,6 +385,109 @@ export default function StudentManagementApp() {
               )}
             </div>
           </>
+        )}
+
+        {/* SQL Console Tab */}
+        {activeTab === "sql" && (
+          <div className="bg-white rounded-b-xl shadow-lg p-8">
+            <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+              <Terminal className="w-6 h-6 text-indigo-600" />
+              SQL Console
+            </h2>
+
+            <div className="mb-4">
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Enter SQL Command:
+              </label>
+              <textarea
+                value={sqlQuery}
+                onChange={(e) => setSqlQuery(e.target.value)}
+                className="w-full h-32 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none font-mono text-sm"
+                placeholder="SHOW TABLES"
+              />
+            </div>
+
+            <button
+              onClick={executeSql}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition mb-4"
+            >
+              Execute Query
+            </button>
+
+            <div className="mb-4">
+              <h3 className="font-semibold text-gray-700 mb-2">
+                Quick Commands:
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setSqlQuery("SHOW TABLES")}
+                  className="bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded text-sm"
+                >
+                  SHOW TABLES
+                </button>
+                <button
+                  onClick={() => setSqlQuery("SELECT * FROM students")}
+                  className="bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded text-sm"
+                >
+                  SELECT ALL
+                </button>
+                <button
+                  onClick={() => setSqlQuery("DESCRIBE students")}
+                  className="bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded text-sm"
+                >
+                  DESCRIBE
+                </button>
+              </div>
+            </div>
+
+            {sqlResult && (
+              <div className="bg-gray-50 rounded-lg p-4 border-2 border-gray-200">
+                <h3 className="font-semibold text-gray-700 mb-2">Result:</h3>
+                {sqlResult.success ? (
+                  sqlResult.data ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b-2 border-gray-300">
+                            {Object.keys(sqlResult.data[0] || {}).map((col) => (
+                              <th
+                                key={col}
+                                className="text-left py-2 px-3 font-semibold"
+                              >
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sqlResult.data.map((row, i) => (
+                            <tr key={i} className="border-b border-gray-200">
+                              {Object.values(row).map((val, j) => (
+                                <td key={j} className="py-2 px-3">
+                                  {String(val)}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <p className="text-gray-600 text-xs mt-2">
+                        Rows: {sqlResult.rowCount}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-green-600 font-medium">
+                      {sqlResult.message}
+                    </p>
+                  )
+                ) : (
+                  <p className="text-red-600 font-medium">
+                    Error: {sqlResult.error}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="bg-indigo-50 border-2 border-indigo-200 rounded-xl p-6 mt-6">
