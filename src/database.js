@@ -1,6 +1,4 @@
 /* eslint-disable no-unused-vars */
-// database.js - RDBMS with File Persistence
-
 export class SimpleRDBMS {
   constructor() {
     this.tables = {};
@@ -180,7 +178,6 @@ export class SimpleRDBMS {
     const selectPart = whereParts[0];
     const whereClause = whereParts[1]?.trim();
 
-    // Check for JOIN
     const joinMatch = selectPart.match(
       /FROM\s+(\w+)\s+JOIN\s+(\w+)\s+ON\s+([\w.]+)\s*=\s*([\w.]+)/i
     );
@@ -201,12 +198,10 @@ export class SimpleRDBMS {
 
     let rows = [...table.rows];
 
-    // Apply WHERE clause
     if (whereClause) {
       rows = rows.filter((row) => this.evaluateWhere(row, whereClause));
     }
 
-    // Project specific columns
     if (columns !== "*") {
       rows = rows.map((row) => {
         const projected = {};
@@ -266,14 +261,12 @@ export class SimpleRDBMS {
     const table = this.tables[tableName];
     if (!table) throw new Error(`Table ${tableName} does not exist`);
 
-    // Parse SET clause
     const updates = {};
     setPart.split(",").forEach((s) => {
       const [col, val] = s.split("=").map((v) => v.trim());
       updates[col] = this.parseValue(val);
     });
 
-    // Apply updates to matching rows
     let count = 0;
     table.rows.forEach((row) => {
       if (this.evaluateWhere(row, whereClause)) {
